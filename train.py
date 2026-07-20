@@ -1,5 +1,6 @@
 import os
 import argparse
+import glob
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 # my import
@@ -7,6 +8,36 @@ from dataset_all import TrainLabeled, TrainUnlabeled, ValLabeled
 from model import AIMnet
 from utils import *
 from trainer import Trainer
+
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in ('true', '1', 'yes', 'y'):
+        return True
+    if value in ('false', '0', 'no', 'n'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
+def find_latest_checkpoint(save_path):
+    latest = os.path.join(save_path, 'latest.pth')
+    if os.path.isfile(latest):
+        return latest
+
+    checkpoints = glob.glob(os.path.join(save_path, 'model_e*.pth'))
+    if not checkpoints:
+        return None
+
+    def epoch_from_name(path):
+        name = os.path.splitext(os.path.basename(path))[0]
+        try:
+            return int(name.split('model_e')[-1])
+        except ValueError:
+            return -1
+
+    return max(checkpoints, key=epoch_from_name)
 
 
 def main(gpu, args):
@@ -48,15 +79,25 @@ if __name__ == '__main__':
     parser.add_argument('--train_batchsize', default=8, type=int, help='train batchsize')
     parser.add_argument('--val_batchsize', default=4, type=int, help='val batchsize')
     parser.add_argument('--crop_size', default=256, type=int, help='crop size')
-    parser.add_argument('--resume', default='False', type=str, help='if resume')
-    parser.add_argument('--resume_path', default='/path/to/your/net.pth', type=str, help='if resume')
+    parser.add_argument('--resume', default=False, type=str2bool, help='resume from checkpoint')
+    parser.add_argument('--resume_path', default='', type=str, help='checkpoint path for resume')
+    parser.add_argument('--auto_resume', default=False, type=str2bool, help='resume from latest checkpoint in save_path')
     parser.add_argument('--use_pretain', default='False', type=str, help='use pretained model')
     parser.add_argument('--pretrained_path', default='/path/to/pretained/net.pth', type=str, help='if pretrained')
     parser.add_argument('--data_dir', default='./data', type=str, help='data root path')
     parser.add_argument('--save_path', default='./model/ckpt/', type=str)
+    parser.add_argument('--save_period', default=20, type=int, help='save numbered checkpoint every N epochs')
     parser.add_argument('--log_dir', default='./model/log', type=str)
 
     args = parser.parse_args()
     if not os.path.isdir(args.save_path):
         os.makedirs(args.save_path)
+    if args.auto_resume and not args.resume_path:
+        latest_checkpoint = find_latest_checkpoint(args.save_path)
+        if latest_checkpoint is None:
+            print(f'No checkpoint found in {args.save_path}; starting from scratch.')
+        else:
+            args.resume = True
+            args.resume_path = latest_checkpoint
+            print(f'Auto-resume checkpoint: {args.resume_path}')
     main(-1, args)

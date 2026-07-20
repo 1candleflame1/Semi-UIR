@@ -1,5 +1,7 @@
+import os
 import torch
 import numpy as np
+from pathlib import Path
 from tqdm import tqdm
 import torch.nn as nn
 from itertools import cycle
@@ -14,7 +16,20 @@ from torchvision.models import vgg16
 from loss.losses import *
 from model import GetGradientNopadding
 from loss.contrast import ContrastLoss
-import pyiqa
+
+
+class SimpleIQA(nn.Module):
+    def forward(self, image):
+        image = torch.clamp(image, 0, 1)
+        contrast = image.flatten(1).std(dim=1)
+        gray = (
+            0.299 * image[:, 0]
+            + 0.587 * image[:, 1]
+            + 0.114 * image[:, 2]
+        )
+        exposure = 1 - torch.abs(gray.mean(dim=(1, 2)) - 0.5) * 2
+        saturation = image.std(dim=1).mean(dim=(1, 2))
+        return contrast + exposure + saturation
 
 
 class Trainer:
@@ -31,14 +46,14 @@ class Trainer:
         self.gamma = 0.5
         self.start_epoch = 1
         self.epochs = args.num_epochs
-        self.save_period = 20
+        self.save_period = args.save_period
         self.loss_unsup = nn.L1Loss()
         self.loss_str = MyLoss().cuda()
         self.loss_grad = nn.L1Loss().cuda()
         self.loss_cr = ContrastLoss().cuda()
         self.consistency = 0.2
         self.consistency_rampup = 100.0
-        self.iqa_metric = pyiqa.create_metric('musiq', as_loss=True).cuda()
+        self.iqa_metric = self._create_iqa_metric()
         vgg_model = vgg16(pretrained=True).features[:16]
         vgg_model = vgg_model.cuda()
         self.loss_per = PerpetualLoss(vgg_model).cuda()
@@ -51,6 +66,50 @@ class Trainer:
         self.optimizer_s = AdamP(self.model.parameters(), lr=2e-4, betas=(0.9, 0.999), weight_decay=1e-4)
         # self.lr_scheduler_s = lr_scheduler.StepLR(self.optimizer_s, step_size=100, gamma=0.1)
         self.lr_scheduler_s = lr_scheduler.MultiStepLR(self.optimizer_s, milestones=[100, 150], gamma=0.1)
+        self._load_checkpoint_if_needed()
+
+    def _load_checkpoint_if_needed(self):
+        if not self.args.resume:
+            return
+
+        if not self.args.resume_path:
+            raise ValueError('--resume_path is required when --resume True')
+
+        checkpoint = torch.load(self.args.resume_path, map_location='cuda')
+        self.model.load_state_dict(checkpoint['state_dict'])
+
+        if 'tmodel_state_dict' in checkpoint:
+            self.tmodel.load_state_dict(checkpoint['tmodel_state_dict'])
+        else:
+            print('Checkpoint has no teacher model state; initializing teacher from student.')
+            self.tmodel.load_state_dict(self.model.module.state_dict())
+
+        if 'optimizer_dict' in checkpoint:
+            self.optimizer_s.load_state_dict(checkpoint['optimizer_dict'])
+        else:
+            print('Checkpoint has no optimizer state; optimizer starts fresh.')
+
+        if 'scheduler_dict' in checkpoint:
+            self.lr_scheduler_s.load_state_dict(checkpoint['scheduler_dict'])
+        else:
+            print('Checkpoint has no scheduler state; scheduler state is inferred from epoch.')
+            self.lr_scheduler_s.last_epoch = checkpoint.get('epoch', 0)
+
+        self.start_epoch = checkpoint.get('epoch', 0) + 1
+        self.curiter = checkpoint.get('curiter', (self.start_epoch - 1) * self.iter_per_epoch)
+        print(f"Resumed from {self.args.resume_path} at epoch {self.start_epoch}.")
+
+    def _create_iqa_metric(self):
+        musiq_weight = Path.home() / ".cache/torch/hub/pyiqa/musiq_koniq_ckpt-e95806b9.pth"
+        if not musiq_weight.exists():
+            print(f"Falling back to SimpleIQA because MUSIQ weight is missing: {musiq_weight}")
+            return SimpleIQA().cuda()
+        try:
+            import pyiqa
+            return pyiqa.create_metric('musiq', as_loss=True).cuda()
+        except Exception as exc:
+            print(f"Falling back to SimpleIQA because MUSIQ is unavailable: {exc}")
+            return SimpleIQA().cuda()
 
     @torch.no_grad()
     def update_teachers(self, teacher, itera, keep_rate=0.996):
@@ -89,11 +148,8 @@ class Trainer:
 
     def train(self):
         self.freeze_teachers_parameters()
-        if self.start_epoch == 1:
+        if self.start_epoch == 1 and not self.args.resume:
             initialize_weights(self.model)
-        else:
-            checkpoint = torch.load(self.args.resume_path)
-            self.model.load_state_dict(checkpoint['state_dict'])
         for epoch in range(self.start_epoch, self.epochs + 1):
             loss_ave, psnr_train = self._train_epoch(epoch)
             loss_val = loss_ave.item() / self.args.crop_size * self.args.train_batchsize
@@ -107,13 +163,19 @@ class Trainer:
             for name, param in self.model.named_parameters():
                 self.writer.add_histogram(f"{name}", param, 0)
 
-            # Save checkpoint
+            state = {'arch': type(self.model).__name__,
+                     'epoch': epoch,
+                     'state_dict': self.model.state_dict(),
+                     'tmodel_state_dict': self.tmodel.state_dict(),
+                     'optimizer_dict': self.optimizer_s.state_dict(),
+                     'scheduler_dict': self.lr_scheduler_s.state_dict(),
+                     'curiter': self.curiter}
+            latest_name = os.path.join(str(self.args.save_path), 'latest.pth')
+            torch.save(state, latest_name)
+
+            # Save numbered checkpoint
             if epoch % self.save_period == 0 and self.args.local_rank <= 0:
-                state = {'arch': type(self.model).__name__,
-                         'epoch': epoch,
-                         'state_dict': self.model.state_dict(),
-                         'optimizer_dict': self.optimizer_s.state_dict()}
-                ckpt_name = str(self.args.save_path) + 'model_e{}.pth'.format(str(epoch))
+                ckpt_name = os.path.join(str(self.args.save_path), 'model_e{}.pth'.format(str(epoch)))
                 print("Saving a checkpoint: {} ...".format(str(ckpt_name)))
                 torch.save(state, ckpt_name)
 

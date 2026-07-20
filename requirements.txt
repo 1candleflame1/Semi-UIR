@@ -1,6 +1,6 @@
 # CUDA 11.1
-torch==1.8.1
-torchvision==0.9.1
+torch==2.0.1
+torchvision==0.15.2
 pyiqa
 mmcv-full==1.6.2
 tqdm

@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.autograd import Variable
 import torch.utils.data as data
 import numpy as np
@@ -10,7 +11,7 @@ from adamp import AdamP
 from model import AIMnet
 from dataset_all import TestData
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 bz = 1
 model_root = 'pretrained/model.pth'
@@ -22,14 +23,29 @@ checkpoint = torch.load(model_root)
 Mydata_ = TestData(input_root)
 data_load = data.DataLoader(Mydata_, batch_size=bz)
 
+device_ids = list(range(torch.cuda.device_count()))
+if not device_ids:
+    raise RuntimeError("test.py requires at least one CUDA GPU.")
+
 model = AIMnet().cuda()
-model = nn.DataParallel(model, device_ids=[0, 1])
+model = nn.DataParallel(model, device_ids=device_ids)
 optimizer = AdamP(model.parameters(), lr=2e-4, betas=(0.9, 0.999), weight_decay=1e-4)
 model.load_state_dict(checkpoint['state_dict'])
 optimizer.load_state_dict(checkpoint['optimizer_dict'])
 epoch = checkpoint['epoch']
 model.eval()
 print('START!')
+
+
+def pad_to_multiple(tensor, multiple=4):
+    _, _, height, width = tensor.size()
+    pad_h = (multiple - height % multiple) % multiple
+    pad_w = (multiple - width % multiple) % multiple
+    if pad_h == 0 and pad_w == 0:
+        return tensor, height, width
+    return F.pad(tensor, (0, pad_w, 0, pad_h), mode='reflect'), height, width
+
+
 if 1:
     print('Load model successfully!')
     for data_idx, data_ in enumerate(data_load):
@@ -39,8 +55,11 @@ if 1:
         data_la = Variable(data_la).cuda()
         print(data_idx)
         with torch.no_grad():
+            data_input, origin_h, origin_w = pad_to_multiple(data_input)
+            data_la, _, _ = pad_to_multiple(data_la)
             result, _ = model(data_input, data_la)
-            name = Mydata_.A_paths[data_idx].split('/')[5]
+            result = result[:, :, :origin_h, :origin_w]
+            name = os.path.basename(Mydata_.A_paths[data_idx])
             print(name)
             temp_res = np.transpose(result[0, :].cpu().detach().numpy(), (1, 2, 0))
             temp_res[temp_res > 1] = 1

@@ -10,6 +10,7 @@ IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG',
     '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP',
 ]
+RESAMPLE_BICUBIC = getattr(Image, "Resampling", Image).BICUBIC
 
 
 def is_image_file(filename):
@@ -76,9 +77,9 @@ class TrainLabeled(data.Dataset):
         B = Image.open(self.B_paths[index]).convert("RGB")
         C = Image.open(self.C_paths[index]).convert("RGB")
         # resize
-        resized_a = A.resize((280, 280), Image.ANTIALIAS)
-        resized_b = B.resize((280, 280), Image.ANTIALIAS)
-        resized_c = C.resize((280, 280), Image.ANTIALIAS)
+        resized_a = A.resize((280, 280), RESAMPLE_BICUBIC)
+        resized_b = B.resize((280, 280), RESAMPLE_BICUBIC)
+        resized_c = C.resize((280, 280), RESAMPLE_BICUBIC)
         # crop the training image into fineSize
         w, h = resized_a.size
         x, y = randrange(w - self.fineSize + 1), randrange(h - self.fineSize + 1)
@@ -124,8 +125,8 @@ class TrainUnlabeled(data.Dataset):
         A = Image.open(self.A_paths[index]).convert("RGB")
         C = Image.open(self.C_paths[index]).convert("RGB")
         candidate = Image.open(self.D_paths[index]).convert('RGB')
-        A = A.resize((self.fineSize, self.fineSize), Image.ANTIALIAS)
-        C = C.resize((self.fineSize, self.fineSize), Image.ANTIALIAS)
+        A = A.resize((self.fineSize, self.fineSize), RESAMPLE_BICUBIC)
+        C = C.resize((self.fineSize, self.fineSize), RESAMPLE_BICUBIC)
         # strong augmentation
         strong_data = data_aug(A)
         tensor_w = self.transform(A)
@@ -164,9 +165,9 @@ class ValLabeled(data.Dataset):
         A = Image.open(self.A_paths[index]).convert("RGB")
         B = Image.open(self.B_paths[index]).convert("RGB")
         C = Image.open(self.C_paths[index]).convert("RGB")
-        resized_a = A.resize((self.fineSize, self.fineSize), Image.ANTIALIAS)
-        resized_b = B.resize((self.fineSize, self.fineSize), Image.ANTIALIAS)
-        resized_c = C.resize((self.fineSize, self.fineSize), Image.ANTIALIAS)
+        resized_a = A.resize((self.fineSize, self.fineSize), RESAMPLE_BICUBIC)
+        resized_b = B.resize((self.fineSize, self.fineSize), RESAMPLE_BICUBIC)
+        resized_c = C.resize((self.fineSize, self.fineSize), RESAMPLE_BICUBIC)
         # transform to (0, 1)
         tensor_a = self.transform(resized_a)
         tensor_b = self.transform(resized_b)
@@ -219,5 +220,4 @@ def data_aug(images):
     if random.random() < 0.5:
         strong_aug = blurring_image(strong_aug)
     return strong_aug
-
 
