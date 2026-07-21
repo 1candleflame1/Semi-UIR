@@ -1,6 +1,10 @@
 import os
 import argparse
 import glob
+import sys
+import time
+import traceback
+from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 # my import
@@ -8,6 +12,9 @@ from dataset_all import TrainLabeled, TrainUnlabeled, ValLabeled
 from model import AIMnet
 from utils import *
 from trainer import Trainer
+
+
+RUN_REPORT = None
 
 
 def str2bool(value):
@@ -40,7 +47,101 @@ def find_latest_checkpoint(save_path):
     return max(checkpoints, key=epoch_from_name)
 
 
+def format_duration(seconds):
+    seconds = int(seconds)
+    hours, rem = divmod(seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+
+
+def write_run_report(args, trainer, status, start_time, error=None):
+    report_dir = os.path.join(args.save_path, 'reports')
+    os.makedirs(report_dir, exist_ok=True)
+
+    end_time = time.time()
+    start_dt = datetime.fromtimestamp(start_time)
+    end_dt = datetime.fromtimestamp(end_time)
+    last_epoch = trainer.summary.get('last_epoch', 0) if trainer is not None else 0
+    timestamp = start_dt.strftime('%Y%m%d_%H%M%S')
+    report_name = f'train_{timestamp}_{status}_epoch{last_epoch}.md'
+    report_path = os.path.join(report_dir, report_name)
+
+    history = trainer.summary.get('history', []) if trainer is not None else []
+    best = trainer.summary.get('best', {}) if trainer is not None else {}
+    last = history[-1] if history else {}
+
+    lines = [
+        '# Training Run Report',
+        '',
+        f'- Status: `{status}`',
+        f'- Start time: `{start_dt.strftime("%Y-%m-%d %H:%M:%S")}`',
+        f'- End time: `{end_dt.strftime("%Y-%m-%d %H:%M:%S")}`',
+        f'- Duration: `{format_duration(end_time - start_time)}`',
+        f'- Working directory: `{os.getcwd()}`',
+        f'- Command: `{" ".join(sys.argv)}`',
+        '',
+        '## Arguments',
+        '',
+        '```text',
+    ]
+    for key, value in sorted(vars(args).items()):
+        lines.append(f'{key}: {value}')
+    lines.extend([
+        '```',
+        '',
+        '## Result',
+        '',
+        f'- Last epoch: `{last_epoch}`',
+        f'- Last main loss: `{last.get("main_loss", "N/A")}`',
+        f'- Last train PSNR: `{last.get("train_psnr", "N/A")}`',
+        f'- Last val PSNR: `{last.get("val_psnr", "N/A")}`',
+        f'- Last val SSIM: `{last.get("val_ssim", "N/A")}`',
+        f'- Best val PSNR: `{best.get("val_psnr", "N/A")}` at epoch `{best.get("epoch", "N/A")}`',
+        f'- Best val SSIM: `{best.get("val_ssim", "N/A")}` at epoch `{best.get("ssim_epoch", "N/A")}`',
+        f'- Latest checkpoint: `{os.path.join(args.save_path, "latest.pth")}`',
+        '',
+        '## Epoch History',
+        '',
+        '| Epoch | Main Loss | Train PSNR | Val PSNR | Val SSIM | LR |',
+        '|---:|---:|---:|---:|---:|---:|',
+    ])
+    for row in history:
+        lines.append(
+            f'| {row["epoch"]} | {row["main_loss"]:.6f} | {row["train_psnr"]:.6f} | '
+            f'{row["val_psnr"]:.6f} | {row["val_ssim"]:.6f} | {row["lr"]:.8f} |'
+        )
+
+    if error is not None:
+        lines.extend([
+            '',
+            '## Error',
+            '',
+            '```text',
+            ''.join(traceback.format_exception(type(error), error, error.__traceback__)),
+            '```',
+        ])
+
+    with open(report_path, 'w') as report_file:
+        report_file.write('\n'.join(lines) + '\n')
+
+    print('')
+    print('========== Training Run Summary ==========')
+    print(f'Status: {status}')
+    print(f'Command: {" ".join(sys.argv)}')
+    print(f'Duration: {format_duration(end_time - start_time)}')
+    print(f'Last epoch: {last_epoch}')
+    print(f'Last main loss: {last.get("main_loss", "N/A")}')
+    print(f'Last train PSNR: {last.get("train_psnr", "N/A")}')
+    print(f'Last val PSNR: {last.get("val_psnr", "N/A")}')
+    print(f'Last val SSIM: {last.get("val_ssim", "N/A")}')
+    print(f'Best val PSNR: {best.get("val_psnr", "N/A")} at epoch {best.get("epoch", "N/A")}')
+    print(f'Training report saved to: {report_path}')
+    print('==========================================')
+    return report_path
+
+
 def main(gpu, args):
+    global RUN_REPORT
     args.local_rank = gpu
     # random seed
     setup_seed(2022)
@@ -64,12 +165,26 @@ def main(gpu, args):
     print('student model params: %d' % count_parameters(net))
     # tensorboard
     writer = SummaryWriter(log_dir=args.log_dir)
-    trainer = Trainer(model=net, tmodel=ema_net, args=args, supervised_loader=paired_loader,
-                      unsupervised_loader=unpaired_loader,
-                      val_loader=val_loader, iter_per_epoch=len(unpaired_loader), writer=writer)
-
-    trainer.train()
-    writer.close()
+    trainer = None
+    start_time = time.time()
+    status = 'completed'
+    error = None
+    try:
+        trainer = Trainer(model=net, tmodel=ema_net, args=args, supervised_loader=paired_loader,
+                          unsupervised_loader=unpaired_loader,
+                          val_loader=val_loader, iter_per_epoch=len(unpaired_loader), writer=writer)
+        trainer.train()
+    except KeyboardInterrupt as exc:
+        status = 'interrupted'
+        error = exc
+        raise
+    except Exception as exc:
+        status = 'failed'
+        error = exc
+        raise
+    finally:
+        writer.close()
+        RUN_REPORT = write_run_report(args, trainer, status, start_time, error)
 
 
 if __name__ == '__main__':

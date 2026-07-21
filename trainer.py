@@ -66,6 +66,16 @@ class Trainer:
         self.optimizer_s = AdamP(self.model.parameters(), lr=2e-4, betas=(0.9, 0.999), weight_decay=1e-4)
         # self.lr_scheduler_s = lr_scheduler.StepLR(self.optimizer_s, step_size=100, gamma=0.1)
         self.lr_scheduler_s = lr_scheduler.MultiStepLR(self.optimizer_s, milestones=[100, 150], gamma=0.1)
+        self.summary = {
+            'last_epoch': 0,
+            'history': [],
+            'best': {
+                'epoch': None,
+                'val_psnr': float('-inf'),
+                'ssim_epoch': None,
+                'val_ssim': float('-inf'),
+            },
+        }
         self._load_checkpoint_if_needed()
 
     def _load_checkpoint_if_needed(self):
@@ -154,11 +164,14 @@ class Trainer:
             loss_ave, psnr_train = self._train_epoch(epoch)
             loss_val = loss_ave.item() / self.args.crop_size * self.args.train_batchsize
             train_psnr = sum(psnr_train) / len(psnr_train)
-            psnr_val = self._valid_epoch(max(0, epoch))
+            psnr_val, val_ssim = self._valid_epoch(max(0, epoch))
             val_psnr = sum(psnr_val) / len(psnr_val)
+            lr = self.lr_scheduler_s.get_last_lr()[0]
 
             print('[%d] main_loss: %.6f, train psnr: %.6f, val psnr: %.6f, lr: %.8f' % (
-                epoch, loss_val, train_psnr, val_psnr, self.lr_scheduler_s.get_last_lr()[0]))
+                epoch, loss_val, train_psnr, val_psnr, lr))
+
+            self._update_summary(epoch, loss_val, train_psnr, val_psnr, val_ssim, lr)
 
             for name, param in self.model.named_parameters():
                 self.writer.add_histogram(f"{name}", param, 0)
@@ -178,6 +191,23 @@ class Trainer:
                 ckpt_name = os.path.join(str(self.args.save_path), 'model_e{}.pth'.format(str(epoch)))
                 print("Saving a checkpoint: {} ...".format(str(ckpt_name)))
                 torch.save(state, ckpt_name)
+
+    def _update_summary(self, epoch, loss_val, train_psnr, val_psnr, val_ssim, lr):
+        self.summary['last_epoch'] = epoch
+        self.summary['history'].append({
+            'epoch': epoch,
+            'main_loss': float(loss_val),
+            'train_psnr': float(train_psnr),
+            'val_psnr': float(val_psnr),
+            'val_ssim': float(val_ssim),
+            'lr': float(lr),
+        })
+        if val_psnr > self.summary['best']['val_psnr']:
+            self.summary['best']['epoch'] = epoch
+            self.summary['best']['val_psnr'] = float(val_psnr)
+        if val_ssim > self.summary['best']['val_ssim']:
+            self.summary['best']['ssim_epoch'] = epoch
+            self.summary['best']['val_ssim'] = float(val_ssim)
 
     def _train_epoch(self, epoch):
         sup_loss = AverageMeter()
@@ -263,7 +293,7 @@ class Trainer:
             self.writer.add_scalar('Val_psnr', val_psnr.avg, global_step=epoch)
             self.writer.add_scalar('Val_ssim', val_ssim.avg, global_step=epoch)
             del val_output, val_label, val_data
-            return psnr_val
+            return psnr_val, val_ssim.avg
 
     def _get_available_devices(self, n_gpu):
         sys_gpu = torch.cuda.device_count()

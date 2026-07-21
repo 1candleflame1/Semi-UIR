@@ -1,0 +1,24 @@
+# 忽略数据集
+dataset/
+data/
+model/
+images_res_my/
+
+# 忽略模型文件
+*.pth
+*.pt
+*.h5
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略日志
+*.log
+log/
+
+# 忽略论文
+*.pdf
+
+# 忽略结果图片
+result/
